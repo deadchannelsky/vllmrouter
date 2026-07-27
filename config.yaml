@@ -1,0 +1,20 @@
+host: "0.0.0.0"
+port: 8000
+log_dir: "logs"
+
+pool:
+  max_size: 2
+  base_port: 9000
+  startup_timeout_seconds: 120
+
+models:
+  mistral-7b:
+    model_path: "/models/mistral-7b"
+    vllm_args:
+      - "--dtype=float16"
+      - "--max-model-len=8192"
+  llama3-8b:
+    model_path: "/models/llama3-8b"
+    vllm_args:
+      - "--dtype=bfloat16"
+      - "--tensor-parallel-size=2"
