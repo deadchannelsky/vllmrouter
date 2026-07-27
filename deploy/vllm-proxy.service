@@ -1,0 +1,33 @@
+[Unit]
+Description=vllm-proxy — OpenAI-compatible LLM router
+After=network.target
+# If your models are on a network mount, uncomment and adjust:
+# After=network.target mnt-models.mount
+
+[Service]
+Type=simple
+User=vllm-proxy
+Group=vllm-proxy
+WorkingDirectory=/opt/vllm-proxy
+
+ExecStart=/opt/vllm-proxy/venv/bin/vllm-proxy \
+    --config /opt/vllm-proxy/config.yaml \
+    --host 0.0.0.0 \
+    --port 8000
+
+# Must exceed pool.startup_timeout_seconds so the proxy is not SIGKILL'd
+# while waiting for VLLM children to finish shutting down.
+TimeoutStopSec=300
+
+Restart=on-failure
+RestartSec=10
+
+Environment=PATH=/opt/vllm-proxy/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LD_LIBRARY_PATH=/usr/local/cuda/lib64
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vllm-proxy
+
+[Install]
+WantedBy=multi-user.target
