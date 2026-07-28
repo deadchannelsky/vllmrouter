@@ -53,11 +53,15 @@ def main() -> None:
         logging.critical("Failed to load config: %s", exc)
         sys.exit(1)
 
+    try:
+        app = create_app(config)
+    except RuntimeError as exc:
+        logging.critical("Failed to start vllm-proxy: %s", exc)
+        sys.exit(1)
+
     # CLI flags override config file values.
     host = args.host or config.host
     port = args.port or config.port
-
-    app = create_app(config)
 
     import uvicorn
 

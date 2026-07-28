@@ -1,3 +1,9 @@
+# Authentication is NOT configured here.
+# Set the VLLM_KEYS_FILE environment variable to the path of the API key file
+# before starting vllm-proxy.  Example (systemd unit):
+#   Environment=VLLM_KEYS_FILE=/opt/vllm-proxy/keys.txt
+# See DEPLOYMENT.md § 5 "API Key Authorization" for the key file format.
+
 host: "0.0.0.0"
 port: 8000
 log_dir: "logs"

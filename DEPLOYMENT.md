@@ -13,13 +13,14 @@ log management.
 2. [System User and Directory Layout](#2-system-user-and-directory-layout)
 3. [Install the Proxy](#3-install-the-proxy)
 4. [Configuration](#4-configuration)
-5. [systemd Service](#5-systemd-service)
-6. [Log Rotation](#6-log-rotation)
-7. [Firewall / Port Reference](#7-firewall--port-reference)
-8. [Smoke Test](#8-smoke-test)
-9. [Admin API Cheat Sheet](#9-admin-api-cheat-sheet)
-10. [Updating the Code](#10-updating-the-code)
-11. [Uninstall](#11-uninstall)
+5. [API Key Authorization](#5-api-key-authorization)
+6. [systemd Service](#6-systemd-service)
+7. [Log Rotation](#7-log-rotation)
+8. [Firewall / Port Reference](#8-firewall--port-reference)
+9. [Smoke Test](#9-smoke-test)
+10. [Admin API Cheat Sheet](#10-admin-api-cheat-sheet)
+11. [Updating the Code](#11-updating-the-code)
+12. [Uninstall](#12-uninstall)
 
 ---
 
@@ -146,7 +147,82 @@ models:
 
 ---
 
-## 5. systemd Service
+## 5. API Key Authorization
+
+Every request to the proxy — including `/v1/*` and `/admin/*` endpoints — must
+carry a valid API key in the standard OpenAI `Authorization` header:
+
+```
+Authorization: Bearer <api-key>
+```
+
+### How it works
+
+The proxy reads the list of accepted keys from a plain-text file on disk.  The
+path to that file is given by the **`VLLM_KEYS_FILE`** environment variable,
+which must be set before the proxy starts.  The file is re-read on **every
+request**, so keys added or removed by the external key-management application
+take effect immediately — no restart required.
+
+### Key file format
+
+```
+# Lines starting with '#' are comments and are ignored.
+# Blank lines are also ignored.
+
+sk-prod-abc123def456
+sk-prod-xyz789ghi012
+
+# CI / test key
+sk-test-00000000
+```
+
+- One key per line.
+- Leading and trailing whitespace is stripped.
+- Lines starting with `#` are comments.
+- Blank (whitespace-only) lines are ignored.
+- The file may be empty; in that case all requests are denied.
+
+### Setting up the key file
+
+```bash
+# Create the key file (owned and readable only by the service account)
+touch /opt/vllm-proxy/keys.txt
+chown vllm-proxy:vllm-proxy /opt/vllm-proxy/keys.txt
+chmod 600 /opt/vllm-proxy/keys.txt
+
+# Add your first key
+echo "sk-prod-abc123def456" >> /opt/vllm-proxy/keys.txt
+```
+
+The external key-management application can append, remove, or rewrite keys in
+this file at any time. The proxy will pick up the change on the very next
+request.
+
+### HTTP error responses
+
+| Condition | Status |
+|---|---|
+| `Authorization` header missing or not in `Bearer <key>` format | `401 Unauthorized` |
+| Key present but not in the key file | `403 Forbidden` |
+| Key file is missing or unreadable at request time | `503 Service Unavailable` |
+
+A `503` is returned (not `401`) when the file cannot be read, so operators can
+distinguish an auth misconfiguration from a key-file I/O problem. The proxy
+will recover automatically once the file becomes readable again.
+
+### Startup guard
+
+If `VLLM_KEYS_FILE` is not set in the environment, the proxy will **refuse to
+start** and log a clear error:
+
+```
+CRITICAL Failed to start vllm-proxy: VLLM_KEYS_FILE environment variable is not set. ...
+```
+
+---
+
+## 6. systemd Service
 
 Create `/etc/systemd/system/vllm-proxy.service`:
 
@@ -168,6 +244,9 @@ ExecStart=/opt/vllm-proxy/venv/bin/vllm-proxy \
     --config /opt/vllm-proxy/config.yaml \
     --host 0.0.0.0 \
     --port 8000
+
+# Required: path to the API key file managed by the external key application.
+Environment=VLLM_KEYS_FILE=/opt/vllm-proxy/keys.txt
 
 # Give VLLM processes time to flush GPU memory on shutdown.
 # Must be greater than pool.startup_timeout_seconds to avoid
@@ -207,7 +286,7 @@ journalctl -u vllm-proxy -f
 
 ---
 
-## 6. Log Rotation
+## 7. Log Rotation
 
 VLLM writes verbose output. Without rotation a busy model's log will fill the
 disk within days.
@@ -238,7 +317,7 @@ logrotate --debug /etc/logrotate.d/vllm-proxy
 
 ---
 
-## 7. Firewall / Port Reference
+## 8. Firewall / Port Reference
 
 | Port | Direction | Purpose |
 |---|---|---|
@@ -261,14 +340,18 @@ firewall-cmd --reload
 
 ---
 
-## 8. Smoke Test
+## 9. Smoke Test
 
 ```bash
+KEY="sk-your-key-here"
+
 # 1. Confirm the proxy is up
-curl -s http://localhost:8000/v1/models | python3 -m json.tool
+curl -s http://localhost:8000/v1/models \
+  -H "Authorization: Bearer $KEY" | python3 -m json.tool
 
 # 2. Send a chat completion (triggers cold-start if model not yet warm)
 curl -s http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "mistral-7b",
@@ -278,6 +361,7 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 # 3. Streaming response
 curl -sN http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "mistral-7b",
@@ -287,7 +371,8 @@ curl -sN http://localhost:8000/v1/chat/completions \
   }'
 
 # 4. Inspect pool state via admin API
-curl -s http://localhost:8000/admin/models | python3 -m json.tool
+curl -s http://localhost:8000/admin/models \
+  -H "Authorization: Bearer $KEY" | python3 -m json.tool
 ```
 
 The first request to a cold model will block for up to
@@ -296,26 +381,30 @@ immediately from the warm pool.
 
 ---
 
-## 9. Admin API Cheat Sheet
+## 10. Admin API Cheat Sheet
 
-All admin endpoints are on the same port as the proxy (`8000` by default).
-There is no authentication — restrict access to trusted hosts at the network
-layer.
+All admin endpoints are on the same port as the proxy (`8000` by default) and
+require the same `Authorization: Bearer <key>` header as the `/v1/*` routes.
 
 ```bash
 BASE=http://localhost:8000
+KEY="sk-your-key-here"
 
 # List all configured models and which are warm
-curl -s $BASE/admin/models | python3 -m json.tool
+curl -s $BASE/admin/models \
+  -H "Authorization: Bearer $KEY" | python3 -m json.tool
 
 # Pre-warm a model immediately (blocks until ready or timeout)
-curl -s -X POST $BASE/admin/models/mistral-7b/load
+curl -s -X POST $BASE/admin/models/mistral-7b/load \
+  -H "Authorization: Bearer $KEY"
 
 # Evict a model from the pool (frees GPU memory)
-curl -s -X POST $BASE/admin/models/llama3-8b/unload
+curl -s -X POST $BASE/admin/models/llama3-8b/unload \
+  -H "Authorization: Bearer $KEY"
 
 # Add a new model at runtime (ephemeral — lost on restart)
 curl -s -X POST $BASE/admin/models/phi-3 \
+  -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model_path": "/models/phi-3",
@@ -324,12 +413,13 @@ curl -s -X POST $BASE/admin/models/phi-3 \
   }'
 
 # Remove a model entirely (unloads first if warm)
-curl -s -X DELETE $BASE/admin/models/phi-3
+curl -s -X DELETE $BASE/admin/models/phi-3 \
+  -H "Authorization: Bearer $KEY"
 ```
 
 ---
 
-## 10. Updating the Code
+## 11. Updating the Code
 
 ```bash
 # Pull latest code
@@ -348,7 +438,7 @@ admin API do not require a restart but are not persisted across restarts.
 
 ---
 
-## 11. Uninstall
+## 12. Uninstall
 
 ```bash
 systemctl stop vllm-proxy

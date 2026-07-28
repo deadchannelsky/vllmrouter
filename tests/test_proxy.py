@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,10 @@ from fastapi.testclient import TestClient
 from vllm_proxy.config import ModelConfig, PoolConfig, ProxyConfig
 from vllm_proxy.app import create_app
 from vllm_proxy.pool import ModelPool
+
+# A stable test key injected into every test via the patched key file.
+_TEST_KEY = "sk-test-proxy"
+_AUTH_HEADER = {"Authorization": f"Bearer {_TEST_KEY}"}
 
 
 # ---------------------------------------------------------------------------
@@ -37,16 +42,27 @@ def make_fake_process(port: int = 9000) -> MagicMock:
     return proc
 
 
-def _make_app_with_fake_pool(config: ProxyConfig):
+def _make_app_with_fake_pool(config: ProxyConfig, tmp_path=None):
     """Return (app, fake_pool) with ModelPool patched at creation time."""
+    import tempfile, pathlib
+
     fake_pool = MagicMock(spec=ModelPool)
     fake_pool.list_loaded = MagicMock(return_value=[])
     fake_pool.get_or_load = AsyncMock()
     fake_pool.unload = AsyncMock()
     fake_pool.shutdown_all = AsyncMock()
 
-    with patch("vllm_proxy.app.ModelPool", return_value=fake_pool):
-        app = create_app(config)
+    # Write a temporary key file so the auth middleware is satisfied.
+    if tmp_path is None:
+        _td = tempfile.mkdtemp()
+        key_file = str(pathlib.Path(_td) / "keys.txt")
+    else:
+        key_file = str(tmp_path / "keys.txt")
+    pathlib.Path(key_file).write_text(f"{_TEST_KEY}\n")
+
+    with patch.dict(os.environ, {"VLLM_KEYS_FILE": key_file}):
+        with patch("vllm_proxy.app.ModelPool", return_value=fake_pool):
+            app = create_app(config)
 
     return app, fake_pool
 
@@ -60,7 +76,7 @@ def test_list_models_returns_aliases():
     config = make_config()
     app, _ = _make_app_with_fake_pool(config)
     with TestClient(app) as client:
-        resp = client.get("/v1/models")
+        resp = client.get("/v1/models", headers=_AUTH_HEADER)
     assert resp.status_code == 200
     data = resp.json()
     ids = [m["id"] for m in data["data"]]
@@ -80,6 +96,7 @@ def test_unknown_model_returns_404():
         resp = client.post(
             "/v1/chat/completions",
             json={"model": "no-such-model", "messages": []},
+            headers=_AUTH_HEADER,
         )
     assert resp.status_code == 404
     assert "no-such-model" in resp.json()["detail"]
@@ -95,7 +112,11 @@ def test_no_model_and_empty_pool_returns_422():
     app, fake_pool = _make_app_with_fake_pool(config)
     fake_pool.list_loaded.return_value = []
     with TestClient(app) as client:
-        resp = client.post("/v1/chat/completions", json={"messages": []})
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"messages": []},
+            headers=_AUTH_HEADER,
+        )
     assert resp.status_code == 422
 
 
@@ -137,6 +158,7 @@ def test_proxy_forwards_request_and_rewrites_model():
             resp = client.post(
                 "/v1/chat/completions",
                 json={"model": "mistral-7b", "messages": [{"role": "user", "content": "hi"}]},
+                headers=_AUTH_HEADER,
             )
 
     assert resp.status_code == 200

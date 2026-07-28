@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -23,6 +24,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm_proxy.auth import load_keys
 from vllm_proxy.config import ProxyConfig
 from vllm_proxy.pool import ModelPool
 
@@ -36,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 def create_app(config: ProxyConfig) -> FastAPI:
     """Create and return the FastAPI application."""
+
+    keys_file = os.environ.get("VLLM_KEYS_FILE")
+    if not keys_file:
+        raise RuntimeError(
+            "VLLM_KEYS_FILE environment variable is not set. "
+            "Set it to the path of the API key file before starting vllm-proxy."
+        )
 
     pool = ModelPool(
         pool_config=config.pool,
@@ -62,6 +71,34 @@ def create_app(config: ProxyConfig) -> FastAPI:
         await client.aclose()
 
     app = FastAPI(title="vllm-proxy", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        try:
+            valid_keys = load_keys(keys_file)
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            logger.error("Failed to read VLLM_KEYS_FILE '%s': %s", keys_file, exc)
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Service temporarily unavailable: key store is unreadable."},
+            )
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing or invalid Authorization header. Expected: Bearer <api-key>"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        token = auth_header[len("Bearer "):]
+        if token not in valid_keys:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid API key."},
+            )
+
+        return await call_next(request)
 
     from vllm_proxy.admin import create_admin_router
 
