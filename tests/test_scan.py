@@ -107,6 +107,19 @@ def test_discovers_new_model_directories(tmp_path):
     assert cfg.models["mistral-7b"].model_path == str(cache / "mistral-7b")
 
 
+def test_discovered_plain_dir_model_defaults_to_loopback_host(tmp_path):
+    """vllm's --host defaults to binding all interfaces, not loopback — an
+    auto-discovered model must not be silently network-exposed."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "llama3-8b").mkdir()
+
+    cfg, path = make_config(tmp_path, scan_paths=[str(cache)])
+    scan_and_register_models(cfg, path)
+
+    assert cfg.models["llama3-8b"].vllm_args == ["--host=127.0.0.1"]
+
+
 def test_skips_files_not_dirs(tmp_path):
     """Files inside the scan path are ignored; only directories become models."""
     cache = tmp_path / "cache"
@@ -234,6 +247,17 @@ def test_hf_cache_repo_registered_with_repo_id_as_model_path(tmp_path):
 
     assert result == ["gemma-4-31b-it"]
     assert cfg.models["gemma-4-31b-it"].model_path == "google/gemma-4-31B-it"
+
+
+def test_hf_cache_repo_defaults_to_loopback_host(tmp_path):
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    make_hf_repo(cache, "google", "gemma-4-31B-it")
+
+    cfg, path = make_config(tmp_path, scan_paths=[str(cache)])
+    scan_and_register_models(cfg, path)
+
+    assert cfg.models["gemma-4-31b-it"].vllm_args == ["--host=127.0.0.1"]
 
 
 def test_hf_cache_repo_already_registered_is_skipped_regardless_of_model_id(tmp_path):

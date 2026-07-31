@@ -123,6 +123,14 @@ def load_config(path: str) -> ProxyConfig:
 # Model directory scanner
 # ---------------------------------------------------------------------------
 
+# vllm's --host defaults to unset, which binds the subprocess's OpenAI-
+# compatible port to all interfaces instead of loopback — bypassing this
+# proxy's API-key auth entirely. Every hand-configured model in this repo's
+# deployments pins --host=127.0.0.1 explicitly; auto-discovered models must
+# get the same default or they're a silent, unauthenticated network exposure
+# the moment they're cold-started.
+_SCAN_DEFAULT_VLLM_ARGS = ["--host=127.0.0.1"]
+
 
 def _hf_cache_repo_id(dirname: str) -> str | None:
     """Return the ``org/name`` repo id encoded in a HF hub cache dirname.
@@ -222,7 +230,7 @@ def scan_and_register_models(config: ProxyConfig, config_path: str) -> list[str]
                     logger.debug("Scan: HF repo '%s' already registered — skipping", repo_id)
                     continue
                 model_id = _slugify_model_id(repo_id, set(config.models))
-                config.models[model_id] = ModelConfig(model_path=repo_id)
+                config.models[model_id] = ModelConfig(model_path=repo_id, vllm_args=list(_SCAN_DEFAULT_VLLM_ARGS))
                 known_model_paths.add(repo_id)
                 new_model_ids.append(model_id)
                 logger.info("Scan: registered new model '%s' from HF cache repo '%s'", model_id, repo_id)
@@ -233,7 +241,7 @@ def scan_and_register_models(config: ProxyConfig, config_path: str) -> list[str]
                 logger.debug("Scan: model '%s' already registered — skipping", model_id)
                 continue
             model_path = os.path.abspath(entry.path)
-            config.models[model_id] = ModelConfig(model_path=model_path)
+            config.models[model_id] = ModelConfig(model_path=model_path, vllm_args=list(_SCAN_DEFAULT_VLLM_ARGS))
             known_model_paths.add(model_path)
             new_model_ids.append(model_id)
             logger.info("Scan: registered new model '%s' from '%s'", model_id, model_path)
