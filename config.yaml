@@ -8,6 +8,17 @@ host: "0.0.0.0"
 port: 8000
 log_dir: "logs"
 
+# Optional: directories to scan for new models on startup.
+# Any sub-directory found here that is not already listed under `models`
+# will be registered automatically using the sub-directory name as the
+# model_id and the full path as model_path.
+#
+# Example:
+#   model_scan_paths:
+#     - "/models/cache"
+#     - "/data/hf_models"
+model_scan_paths: []
+
 pool:
   max_size: 2
   base_port: 9000
