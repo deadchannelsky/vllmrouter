@@ -206,3 +206,125 @@ def test_multiple_scan_paths(tmp_path):
     assert sorted(result) == ["model-a", "model-b"]
     assert "model-a" in cfg.models
     assert "model-b" in cfg.models
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face hub cache layout
+# ---------------------------------------------------------------------------
+
+
+def make_hf_repo(cache_dir, org: str, name: str, complete: bool = True):
+    """Create a ``models--org--name`` dir mimicking the HF hub cache layout."""
+    repo_dir = cache_dir / f"models--{org}--{name}"
+    repo_dir.mkdir()
+    if complete:
+        snapshot = repo_dir / "snapshots" / "abcd1234"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}")
+    return repo_dir
+
+
+def test_hf_cache_repo_registered_with_repo_id_as_model_path(tmp_path):
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    make_hf_repo(cache, "google", "gemma-4-31B-it")
+
+    cfg, path = make_config(tmp_path, scan_paths=[str(cache)])
+    result = scan_and_register_models(cfg, path)
+
+    assert result == ["gemma-4-31b-it"]
+    assert cfg.models["gemma-4-31b-it"].model_path == "google/gemma-4-31B-it"
+
+
+def test_hf_cache_repo_already_registered_is_skipped_regardless_of_model_id(tmp_path):
+    """A repo already configured under a hand-picked id must not be re-added."""
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    make_hf_repo(cache, "Qwen", "Qwen3.6-27B-FP8")
+
+    cfg, path = make_config(
+        tmp_path,
+        scan_paths=[str(cache)],
+        extra_models={"qwen3.6-27b-fp8": "Qwen/Qwen3.6-27B-FP8"},
+    )
+    result = scan_and_register_models(cfg, path)
+
+    assert result == []
+    assert list(cfg.models) == ["qwen3.6-27b-fp8"]
+
+
+def test_hf_cache_incomplete_download_is_skipped(tmp_path):
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    make_hf_repo(cache, "org", "half-downloaded", complete=False)
+
+    cfg, path = make_config(tmp_path, scan_paths=[str(cache)])
+    result = scan_and_register_models(cfg, path)
+
+    assert result == []
+    assert "half-downloaded" not in cfg.models
+
+
+def test_hf_cache_model_id_collision_falls_back_to_org_prefixed_slug(tmp_path):
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    make_hf_repo(cache, "some-org", "widget")
+
+    cfg, path = make_config(
+        tmp_path,
+        scan_paths=[str(cache)],
+        extra_models={"widget": "other-org/widget-v0"},
+    )
+    result = scan_and_register_models(cfg, path)
+
+    assert result == ["some-org-widget"]
+    assert cfg.models["some-org-widget"].model_path == "some-org/widget"
+
+
+def test_hf_cache_housekeeping_dirs_are_ignored(tmp_path):
+    """.locks, .no_exist, etc. living alongside models--... dirs must not be registered."""
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    (cache / ".locks").mkdir()
+    (cache / ".no_exist").mkdir()
+    make_hf_repo(cache, "google", "gemma-4-31B-it")
+
+    cfg, path = make_config(tmp_path, scan_paths=[str(cache)])
+    result = scan_and_register_models(cfg, path)
+
+    assert result == ["gemma-4-31b-it"]
+    assert ".locks" not in cfg.models
+    assert ".no_exist" not in cfg.models
+
+
+def test_hf_cache_and_plain_dirs_in_same_scan_path(tmp_path):
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    make_hf_repo(cache, "ibm-granite", "granite-4.1-30b")
+    (cache / "my-finetune").mkdir()
+
+    cfg, path = make_config(tmp_path, scan_paths=[str(cache)])
+    result = scan_and_register_models(cfg, path)
+
+    assert sorted(result) == ["granite-4.1-30b", "my-finetune"]
+    assert cfg.models["granite-4.1-30b"].model_path == "ibm-granite/granite-4.1-30b"
+    assert cfg.models["my-finetune"].model_path == str(cache / "my-finetune")
+
+
+def test_persist_preserves_env_field(tmp_path):
+    """_persist_models must round-trip the env field, not silently drop it."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "new-model").mkdir()
+
+    cfg, path = make_config(
+        tmp_path,
+        scan_paths=[str(cache)],
+        extra_models={"has-env": "/models/has-env"},
+    )
+    cfg.models["has-env"].env = {"VLLM_USE_DEEP_GEMM": "0"}
+
+    scan_and_register_models(cfg, path)
+
+    reloaded = load_config(path)
+    assert reloaded.models["has-env"].env == {"VLLM_USE_DEEP_GEMM": "0"}

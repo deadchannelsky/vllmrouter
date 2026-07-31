@@ -124,13 +124,67 @@ def load_config(path: str) -> ProxyConfig:
 # ---------------------------------------------------------------------------
 
 
+def _hf_cache_repo_id(dirname: str) -> str | None:
+    """Return the ``org/name`` repo id encoded in a HF hub cache dirname.
+
+    The Hugging Face hub cache names each repo's directory
+    ``models--{org}--{name}`` (``/`` is replaced with ``--`` when the repo id
+    is encoded). Returns ``None`` if *dirname* doesn't match that pattern.
+    """
+    if not dirname.startswith("models--"):
+        return None
+    parts = dirname[len("models--") :].split("--")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return "/".join(parts)
+
+
+def _hf_cache_snapshot_complete(entry_path: str) -> bool:
+    """True if *entry_path* (a ``models--org--name`` dir) has a full snapshot.
+
+    Guards against registering a repo whose download was interrupted: a
+    complete cache entry has a non-empty ``snapshots/<revision>/`` directory
+    (the resolved file tree vllm/transformers actually reads).
+    """
+    snapshots_dir = os.path.join(entry_path, "snapshots")
+    if not os.path.isdir(snapshots_dir):
+        return False
+    return any(
+        os.scandir(revision.path)
+        for revision in os.scandir(snapshots_dir)
+        if revision.is_dir()
+    )
+
+
+def _slugify_model_id(repo_id: str, taken: set[str]) -> str:
+    """Derive a config-friendly model_id from a HF ``org/name`` repo id.
+
+    Uses the repo name (portion after ``/``), lowercased. On collision with an
+    id already in *taken*, falls back to a lowercased ``org-name`` form.
+    """
+    org, name = repo_id.split("/", 1)
+    slug = name.lower()
+    if slug in taken:
+        slug = f"{org.lower()}-{name.lower()}"
+    return slug
+
+
 def scan_and_register_models(config: ProxyConfig, config_path: str) -> list[str]:
     """Scan ``config.model_scan_paths`` and register newly discovered models.
 
-    For each scan path, every immediate sub-directory is treated as a potential
-    model whose ``model_id`` equals the directory name and whose
-    ``model_path`` is the full absolute path to that directory.  Only entries
-    not already present in ``config.models`` are added.
+    Two kinds of entries are recognized in each scan path:
+
+    - Hugging Face hub cache repos (dirs named ``models--{org}--{name}``,
+      e.g. ``~/.cache/huggingface/hub``): registered with ``model_path`` set
+      to the resolved ``org/name`` repo id (not the cache filesystem path),
+      matching how vllm/transformers resolve models from the HF cache.
+      Incomplete downloads (no snapshot yet) are skipped. Dedup is by
+      resolved repo id against existing ``model_path`` values, since a repo
+      may already be registered under a hand-chosen model_id.
+    - Plain local directories (e.g. a finetunes folder): registered as
+      before, with ``model_id`` equal to the directory name and
+      ``model_path`` the absolute path to that directory. Dedup is by
+      model_id.
 
     The discovered models are inserted into ``config.models`` in-place **and**
     written back to the YAML file at *config_path* so they survive the next
@@ -142,6 +196,7 @@ def scan_and_register_models(config: ProxyConfig, config_path: str) -> list[str]
         return []
 
     new_model_ids: list[str] = []
+    known_model_paths = {cfg.model_path for cfg in config.models.values()}
 
     for scan_path in config.model_scan_paths:
         if not os.path.isdir(scan_path):
@@ -151,12 +206,35 @@ def scan_and_register_models(config: ProxyConfig, config_path: str) -> list[str]
         for entry in sorted(os.scandir(scan_path), key=lambda e: e.name):
             if not entry.is_dir():
                 continue
+            if entry.name.startswith("."):
+                # Housekeeping dirs (HF cache's .locks, .no_exist, stray .git, …)
+                continue
+
+            repo_id = _hf_cache_repo_id(entry.name)
+            if repo_id is not None:
+                if not _hf_cache_snapshot_complete(entry.path):
+                    logger.warning(
+                        "Scan: '%s' looks like an incomplete HF cache download — skipping",
+                        entry.name,
+                    )
+                    continue
+                if repo_id in known_model_paths:
+                    logger.debug("Scan: HF repo '%s' already registered — skipping", repo_id)
+                    continue
+                model_id = _slugify_model_id(repo_id, set(config.models))
+                config.models[model_id] = ModelConfig(model_path=repo_id)
+                known_model_paths.add(repo_id)
+                new_model_ids.append(model_id)
+                logger.info("Scan: registered new model '%s' from HF cache repo '%s'", model_id, repo_id)
+                continue
+
             model_id = entry.name
             if model_id in config.models:
                 logger.debug("Scan: model '%s' already registered — skipping", model_id)
                 continue
             model_path = os.path.abspath(entry.path)
             config.models[model_id] = ModelConfig(model_path=model_path)
+            known_model_paths.add(model_path)
             new_model_ids.append(model_id)
             logger.info("Scan: registered new model '%s' from '%s'", model_id, model_path)
 
@@ -184,6 +262,7 @@ def _persist_models(config: ProxyConfig, config_path: str) -> None:
             "model_path": cfg.model_path,
             **({"vllm_args": cfg.vllm_args} if cfg.vllm_args else {}),
             **({"priority": cfg.priority} if cfg.priority != 0 else {}),
+            **({"env": cfg.env} if cfg.env else {}),
         }
         for model_id, cfg in config.models.items()
     }
