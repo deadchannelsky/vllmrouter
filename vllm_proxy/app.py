@@ -157,6 +157,11 @@ def create_app(config: ProxyConfig) -> FastAPI:
                 )
 
         if model_id not in cfg.models:
+            logger.warning(
+                "Rejecting request: model '%s' not in proxy config (known: %s)",
+                model_id,
+                list(cfg.models.keys()),
+            )
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"Model '{model_id}' not found in proxy config."},

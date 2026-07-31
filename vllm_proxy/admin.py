@@ -27,6 +27,7 @@ class ModelConfigBody(BaseModel):
     model_path: str
     vllm_args: list[str] = []
     priority: int = 0
+    env: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ def create_admin_router(config: ProxyConfig, pool: ModelPool) -> APIRouter:
                     "model_path": cfg.model_path,
                     "vllm_args": cfg.vllm_args,
                     "priority": cfg.priority,
+                    "env": cfg.env,
                     "warm": model_id in loaded_ids,
                 }
             )
@@ -74,6 +76,7 @@ def create_admin_router(config: ProxyConfig, pool: ModelPool) -> APIRouter:
             model_path=body.model_path,
             vllm_args=body.vllm_args,
             priority=body.priority,
+            env=body.env,
         )
         logger.info("Admin: upserted model config for '%s'", model_id)
         return JSONResponse({"status": "ok", "model_id": model_id})

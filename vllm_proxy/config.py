@@ -32,6 +32,7 @@ class ModelConfig:
     model_path: str
     vllm_args: list[str] = field(default_factory=list)
     priority: int = 0  # reserved — not used yet
+    env: dict[str, str] = field(default_factory=dict)  # extra env vars for this model's subprocess
 
 
 @dataclass
@@ -66,6 +67,7 @@ def _parse_model(model_id: str, raw: dict[str, Any]) -> ModelConfig:
         model_path=raw["model_path"],
         vllm_args=list(raw.get("vllm_args", [])),
         priority=int(raw.get("priority", 0)),
+        env={str(k): str(v) for k, v in raw.get("env", {}).items()},
     )
 
 

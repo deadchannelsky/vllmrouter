@@ -45,6 +45,7 @@ class VllmProcess:
         vllm_args: list[str],
         port: int,
         log_dir: str,
+        env: dict[str, str] | None = None,
     ) -> "VllmProcess":
         """Spawn ``vllm serve`` and return a :class:`VllmProcess` instance."""
         os.makedirs(log_dir, exist_ok=True)
@@ -55,10 +56,13 @@ class VllmProcess:
 
         logger.info("Starting VLLM process for '%s' on port %d: %s", model_id, port, " ".join(cmd))
 
+        subprocess_env = {**os.environ, **(env or {})}
+
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=log_handle,
             stderr=log_handle,
+            env=subprocess_env,
         )
 
         logger.info("VLLM process for '%s' spawned with PID %d", model_id, process.pid)

@@ -105,6 +105,7 @@ class ModelPool:
                     vllm_args=model_cfg.vllm_args,
                     port=port,
                     log_dir=self._log_dir,
+                    env=model_cfg.env,
                 )
                 ready = await proc.wait_until_ready(
                     timeout=self._pool_config.startup_timeout_seconds

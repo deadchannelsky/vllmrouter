@@ -107,7 +107,7 @@ async def test_lru_eviction_when_pool_full():
     call_count = 0
     fakes = [fake_a, fake_b, fake_c]
 
-    async def fake_start(model_id, model_path, vllm_args, port, log_dir):
+    async def fake_start(model_id, model_path, vllm_args, port, log_dir, env=None):
         nonlocal call_count
         f = fakes[call_count]
         f.port = port  # use the actually allocated port
@@ -141,7 +141,7 @@ async def test_port_recycled_after_eviction():
     fakes = [fake_a, fake_b]
     call_count = 0
 
-    async def fake_start(model_id, model_path, vllm_args, port, log_dir):
+    async def fake_start(model_id, model_path, vllm_args, port, log_dir, env=None):
         nonlocal call_count
         f = fakes[call_count]
         f.port = port
@@ -154,6 +154,21 @@ async def test_port_recycled_after_eviction():
         await pool.get_or_load("model-b")  # evicts model-a, reuses port 9000
 
     assert ports_used == [9000, 9000]
+
+
+@pytest.mark.asyncio
+async def test_model_env_passed_to_vllm_process():
+    pool_cfg = PoolConfig(max_size=1, base_port=9000, startup_timeout_seconds=10)
+    models = {"model-a": ModelConfig(model_path="/models/a", env={"VLLM_USE_DEEP_GEMM": "0"})}
+    pool = ModelPool(pool_config=pool_cfg, models=models, log_dir="/tmp/test-logs")
+
+    fake = _make_fake_process("model-a", 9000)
+    fake.wait_until_ready = AsyncMock(return_value=True)
+
+    with _patch_vllm_start(fake) as mock_start:
+        await pool.get_or_load("model-a")
+
+    assert mock_start.call_args.kwargs["env"] == {"VLLM_USE_DEEP_GEMM": "0"}
 
 
 @pytest.mark.asyncio
@@ -191,7 +206,7 @@ async def test_shutdown_all():
     fakes = [fake_a, fake_b]
     call_count = 0
 
-    async def fake_start(model_id, model_path, vllm_args, port, log_dir):
+    async def fake_start(model_id, model_path, vllm_args, port, log_dir, env=None):
         nonlocal call_count
         f = fakes[call_count]
         f.port = port

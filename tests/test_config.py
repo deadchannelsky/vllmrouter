@@ -64,6 +64,25 @@ def test_load_valid_config(tmp_path):
     assert m.model_path == "/models/my-model"
     assert m.vllm_args == ["--dtype=float16"]
     assert m.priority == 0
+    assert m.env == {}
+
+
+def test_model_env_parsed(tmp_path):
+    path = write_yaml(
+        tmp_path,
+        """
+        pool:
+          max_size: 1
+          base_port: 9000
+        models:
+          m:
+            model_path: "/m"
+            env:
+              VLLM_USE_DEEP_GEMM: "0"
+        """,
+    )
+    cfg = load_config(path)
+    assert cfg.models["m"].env == {"VLLM_USE_DEEP_GEMM": "0"}
 
 
 def test_default_values_applied(tmp_path):
