@@ -6,13 +6,19 @@ Defines three dataclasses:
   - ProxyConfig — top-level config (composes Pool + Models)
 
 `load_config(path)` reads a YAML file and returns a validated ProxyConfig.
+`scan_and_register_models(config, config_path)` scans each directory in
+``config.model_scan_paths`` and registers any new model sub-directories.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +48,7 @@ class ProxyConfig:
     log_dir: str
     pool: PoolConfig
     models: dict[str, ModelConfig]
+    model_scan_paths: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +104,93 @@ def load_config(path: str) -> ProxyConfig:
         for model_id, cfg in raw_models.items()
     }
 
+    scan_paths_raw = raw.get("model_scan_paths", [])
+    if not isinstance(scan_paths_raw, list):
+        raise ValueError("'model_scan_paths' must be a YAML sequence of paths")
+    model_scan_paths = [str(p) for p in scan_paths_raw]
+
     return ProxyConfig(
         host=str(raw.get("host", "0.0.0.0")),
         port=int(raw.get("port", 8000)),
         log_dir=str(raw.get("log_dir", "logs")),
         pool=pool,
         models=models,
+        model_scan_paths=model_scan_paths,
     )
+
+
+# ---------------------------------------------------------------------------
+# Model directory scanner
+# ---------------------------------------------------------------------------
+
+
+def scan_and_register_models(config: ProxyConfig, config_path: str) -> list[str]:
+    """Scan ``config.model_scan_paths`` and register newly discovered models.
+
+    For each scan path, every immediate sub-directory is treated as a potential
+    model whose ``model_id`` equals the directory name and whose
+    ``model_path`` is the full absolute path to that directory.  Only entries
+    not already present in ``config.models`` are added.
+
+    The discovered models are inserted into ``config.models`` in-place **and**
+    written back to the YAML file at *config_path* so they survive the next
+    ``load_config`` call.
+
+    Returns the list of newly registered model_ids.
+    """
+    if not config.model_scan_paths:
+        return []
+
+    new_model_ids: list[str] = []
+
+    for scan_path in config.model_scan_paths:
+        if not os.path.isdir(scan_path):
+            logger.warning("model_scan_paths entry '%s' is not a directory — skipping", scan_path)
+            continue
+
+        for entry in sorted(os.scandir(scan_path), key=lambda e: e.name):
+            if not entry.is_dir():
+                continue
+            model_id = entry.name
+            if model_id in config.models:
+                logger.debug("Scan: model '%s' already registered — skipping", model_id)
+                continue
+            model_path = os.path.abspath(entry.path)
+            config.models[model_id] = ModelConfig(model_path=model_path)
+            new_model_ids.append(model_id)
+            logger.info("Scan: registered new model '%s' from '%s'", model_id, model_path)
+
+    if new_model_ids:
+        _persist_models(config, config_path)
+
+    return new_model_ids
+
+
+def _persist_models(config: ProxyConfig, config_path: str) -> None:
+    """Write the current ``config.models`` mapping back into the YAML file.
+
+    Only the ``models`` key is updated; all other keys and comments in the
+    file are preserved via a round-trip read → merge → write.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+    except OSError as exc:
+        logger.error("scan_and_register_models: could not read '%s' for update: %s", config_path, exc)
+        return
+
+    raw["models"] = {
+        model_id: {
+            "model_path": cfg.model_path,
+            **({"vllm_args": cfg.vllm_args} if cfg.vllm_args else {}),
+            **({"priority": cfg.priority} if cfg.priority != 0 else {}),
+        }
+        for model_id, cfg in config.models.items()
+    }
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as fh:
+            yaml.dump(raw, fh, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        logger.info("Config persisted to '%s' (%d models)", config_path, len(config.models))
+    except OSError as exc:
+        logger.error("scan_and_register_models: could not write '%s': %s", config_path, exc)

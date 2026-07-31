@@ -44,7 +44,7 @@ def main() -> None:
         stream=sys.stdout,
     )
 
-    from vllm_proxy.config import load_config
+    from vllm_proxy.config import load_config, scan_and_register_models
     from vllm_proxy.app import create_app
 
     try:
@@ -52,6 +52,10 @@ def main() -> None:
     except (FileNotFoundError, ValueError) as exc:
         logging.critical("Failed to load config: %s", exc)
         sys.exit(1)
+
+    new_models = scan_and_register_models(config, args.config)
+    if new_models:
+        logging.info("Auto-registered %d model(s) from scan paths: %s", len(new_models), new_models)
 
     try:
         app = create_app(config)
